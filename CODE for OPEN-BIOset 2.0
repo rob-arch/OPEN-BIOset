@@ -1,0 +1,146 @@
+import matplotlib.pyplot as plt
+import numpy as np
+import os
+import pandas as pd
+import seaborn as sn
+from sklearn.model_selection import train_test_split
+import tensorflow as tf
+from tensorflow.keras.preprocessing.image import load_img
+from tensorflow.keras.preprocessing.image import ImageDataGenerator
+def load_images_from_directory(directory, **kwargs):
+    # Load all the items in a given directory into a list of numpy arrays
+    return [np.array(load_img("/".join((directory, item)), **kwargs))for item in os.listdir(directory)]
+
+
+def load_data(root, ignore_dirs=None, **kwargs):
+    # Given a directory, load all the files from each sub-directory as images
+    # Create an array of corresponding labels using the name of each sub-directory
+    images = []
+    labels = []
+    ignore_dirs = [] if ignore_dirs is None else ignore_dirs  # <---- if ignore_dirs is None, make it an empty list
+    # For each directory in the root directory, load images and append
+    image_dirs = os.listdir(root)
+    image_dirs = [i for i in image_dirs if i not in ignore_dirs]  # <---- remove directory if it is in ignore_dirs
+    image_dirs.sort()
+    for i, d in enumerate(image_dirs):
+        path = "/".join((root, d))
+        if os.path.isdir(path):
+            imgs = load_images_from_directory(path, **kwargs)
+            labels += [i] * len(imgs)
+            images += imgs
+    return np.array(images), np.array(labels), image_dirs
+
+#data_dir = "/Users/Glasgow Optics Group/Desktop/Anaconda3/Imageslides"
+
+#images, labels = load_data(data_dir, target_size=(256, 256))   # <---- SW: These labels are the ones that need encoding
+#labels = np.eye(len(set(labels)))[labels]  # <---- SW: This line encodes them NB: could use len(set(labels)) instead of the hard-coded 18
+
+#print(images.shape, labels.shape)
+
+#overcome truncated images error
+from PIL import ImageFile
+ImageFile.LOAD_TRUNCATED_IMAGES = True
+
+# Get data and encode labels
+data_dir = "/Users/Glasgow Optics Group/Desktop/Anaconda3/OPEN-BIOset2"
+x, y, cls_names = load_data(data_dir, target_size=(256, 256), ignore_dirs=["Backgrounds"])  # <---- new keyword argument for ignoring some data folders
+num_classes = len(cls_names)  # <---- load data now returns a list of the class names, from this we get num_classes
+y = np.eye(num_classes)[y]  # Encode y values
+print("Data shape:\n\tx: %s\n\ty: %s" % (x.shape, y.shape))
+
+# Split data
+x_train, x_valid, y_train, y_valid = train_test_split(
+    x, y,
+    test_size=0.20,   # takes 20% of data for testing
+    shuffle=True,  # shuffles the data set
+    random_state=222  # random number to ensure reproducible results
+)
+print("Data split:\n\tTraining: %i\n\tValidation: %i" % (len(y_train), len(y_valid)))
+
+# Data generators
+training_data_generator = ImageDataGenerator(
+    rescale=1.0/255.0,  # normalises pixel values
+    vertical_flip=True,  # randomly flips images
+    rotation_range=15,  # rotates image +/-15degrees
+    width_shift_range=0.05,  # shifts image +/- 5%
+    height_shift_range=0.05  # shifts image +/- 5%
+)
+validation_data_generator = ImageDataGenerator(rescale=1.0/255.0)  # normalises pixel values
+
+
+
+# Iterators
+training_iterator = training_data_generator.flow(x_train, y_train, batch_size=10)
+validation_iterator = validation_data_generator.flow(x_valid, y_valid, batch_size=3, shuffle=False)  # <---- make sure shuffle=False for later prediction
+
+print(len(training_iterator))
+print(len(validation_iterator))
+
+# Initiate and compile model
+model = tf.keras.Sequential()
+model.add(tf.keras.Input(shape=(256, 256, 3)))
+model.add(tf.keras.layers.Conv2D(128, 3, strides=2, activation="relu"))  # 128 filters, 3x3 kernel size with 2 strides
+model.add(tf.keras.layers.MaxPooling2D(pool_size=(2, 2), strides=(2, 2)))  # pool size 2x2 and with 2 strides
+model.add(tf.keras.layers.Conv2D(256, 3, strides=2, activation="relu"))
+model.add(tf.keras.layers.MaxPooling2D(pool_size=(2, 2), strides=(2, 2)))
+model.add(tf.keras.layers.Flatten())  # flattening layer
+model.add(tf.keras.layers.Dense(64, activation="relu"))  # dense layer with 64 hidden units
+model.add(tf.keras.layers.Dense(num_classes, activation="softmax"))  # output dense layer is number of categories
+
+model.summary()
+
+model.compile(
+    optimizer=tf.keras.optimizers.Adam(learning_rate=0.001),  # Adam optimizer
+    loss=tf.keras.losses.CategoricalCrossentropy(),  # since one-hot categories for labels use as loss
+    metrics=[tf.keras.metrics.CategoricalAccuracy(), tf.keras.metrics.AUC(), tf.keras.metrics.Precision()]  # metrics AUC is false positive results
+)
+
+# Train model
+history =   model.fit(
+            training_iterator,
+            steps_per_epoch=len(x_train)/32,  # length of training data divided by batch size
+            epochs=100,  # times through the model / number of test runs
+            validation_data=validation_iterator,
+            validation_steps=len(x_valid)/32  # length of validation data divided by batch size
+            )
+             
+# Get validation predictions
+y_pred = model.predict(validation_iterator)  # <---- Class prdiction on all the validation images
+
+# Get confusion matrix
+conf_mat = tf.math.confusion_matrix(
+    labels=np.argmax(y_valid, axis=1),  # decode the labels
+    predictions=np.argmax(y_pred, axis=1),  # decode the predictions
+    num_classes=num_classes,
+    dtype=tf.dtypes.int32,
+).numpy()  # convert to numpy array
+
+# Plot confusion matrix
+df_cm = pd.DataFrame(conf_mat, index=cls_names, columns=cls_names)
+plt.figure(figsize=(12, 8))
+sn.heatmap(df_cm, annot=True)
+plt.xticks(rotation=30, ha="right")
+plt.tight_layout()
+plt.show()
+
+#plotting AUC and Categorical Accuracy graphs
+
+history_dict = history.history
+AUC_values = history_dict['auc']
+val_AUC_values = history_dict['val_auc']
+acc_values = history_dict['categorical_accuracy']
+val_acc_values = history_dict['val_categorical_accuracy']
+
+plt.figure()
+plt.plot(AUC_values, 'bo', label='training auc')
+plt.plot(val_AUC_values, 'r', label='validation auc')
+plt.legend()
+plt.xlabel('Epoch')
+plt.ylabel('AUC values')
+
+plt.figure()
+plt.plot(acc_values, 'go', label='training categorical accuracy')
+plt.plot(val_acc_values, 'k', label='validation categorical accuracy')
+plt.legend()
+plt.xlabel('Epoch')
+plt.ylabel('Categorical Accuracy Values')
